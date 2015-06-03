@@ -134,8 +134,11 @@ def _has_newline(line):
 class Connection(object):
     """Handles connection to host."""
 
-    def __init__(self, mail):
+    def __init__(self, mail, host):
         self.mail = mail
+        self.settings = self.mail.hosts.get(host)
+        if self.settings is None:
+            raise RuntimeError('Settings not found for: %s' % host)
 
     def __enter__(self):
         if self.mail.suppress:
@@ -152,17 +155,17 @@ class Connection(object):
             self.host.quit()
 
     def configure_host(self):
-        if self.mail.use_ssl:
-            host = smtplib.SMTP_SSL(self.mail.server, self.mail.port)
+        if self.settings['use_ssl']:
+            host = smtplib.SMTP_SSL(self.settings['server'], self.settings['port'])
         else:
-            host = smtplib.SMTP(self.mail.server, self.mail.port)
+            host = smtplib.SMTP(self.settings['server'], self.settings['port'])
 
         host.set_debuglevel(int(self.mail.debug))
 
-        if self.mail.use_tls:
+        if self.settings['use_tls']:
             host.starttls()
-        if self.mail.username and self.mail.password:
-            host.login(self.mail.username, self.mail.password)
+        if self.settings['username'] and self.settings['password']:
+            host.login(self.settings['username'], self.settings['password'])
 
         return host
 
@@ -496,17 +499,17 @@ class _MailMixin(object):
         finally:
             email_dispatched.disconnect(_record)
 
-    def send(self, message):
+    def send(self, message, host):
         """Sends a single message instance. If TESTING is True the message will
         not actually be sent.
 
         :param message: a Message instance.
         """
 
-        with self.connect() as connection:
+        with self.connect(host) as connection:
             message.send(connection)
 
-    def send_message(self, *args, **kwargs):
+    def send_message(self, host, *args, **kwargs):
         """Shortcut for send(msg).
 
         Takes same arguments as Message constructor.
@@ -514,32 +517,48 @@ class _MailMixin(object):
         :versionadded: 0.3.5
         """
 
-        self.send(Message(*args, **kwargs))
+        self.send(Message(*args, **kwargs), host)
 
-    def connect(self):
+    def connect(self, host):
         """Opens a connection to the mail host."""
         app = getattr(self, "app", None) or current_app
         try:
-            return Connection(app.extensions['mail'])
+            return Connection(app.extensions['mail'], host)
         except KeyError:
             raise RuntimeError("The curent application was not configured with Flask-Mail")
 
 
 class _Mail(_MailMixin):
-    def __init__(self, server, username, password, port, use_tls, use_ssl,
-                 default_sender, debug, max_emails, suppress,
+    def __init__(self, hosts, default_sender, debug, max_emails, suppress,
                  ascii_attachments=False):
-        self.server = server
-        self.username = username
-        self.password = password
-        self.port = port
-        self.use_tls = use_tls
-        self.use_ssl = use_ssl
+        # host keys are:
+        #  - server
+        #  - username
+        #  - password
+        #  - port (25)
+        #  - use_tls (False)
+        #  - use_ssl (False)
+        self.hosts = hosts
         self.default_sender = default_sender
+        self._validate_hosts()
         self.debug = debug
         self.max_emails = max_emails
         self.suppress = suppress
         self.ascii_attachments = ascii_attachments
+
+    def _validate_hosts(self):
+        for host in self.hosts:
+            if not isinstance(self.hosts[host], dict):
+                raise RuntimeError("'MAIL_HOSTS' must be a dict")
+            if 'server' not in self.hosts[host]:
+                raise RuntimeError("'server' value not found for %r" % host)
+            if 'username' not in self.hosts[host]:
+                raise RuntimeError("'username' value not found for %r" % host)
+            if 'password' not in self.hosts[host]:
+                raise RuntimeError("'password' value not found for %r" % host)
+            self.hosts[host].setdefault('port', 25)
+            self.hosts[host].setdefault('use_tls', False)
+            self.hosts[host].setdefault('use_ssl', False)
 
 
 class Mail(_MailMixin):
@@ -557,12 +576,7 @@ class Mail(_MailMixin):
 
     def init_mail(self, config, debug=False, testing=False):
         return _Mail(
-            config.get('MAIL_SERVER', '127.0.0.1'),
-            config.get('MAIL_USERNAME'),
-            config.get('MAIL_PASSWORD'),
-            config.get('MAIL_PORT', 25),
-            config.get('MAIL_USE_TLS', False),
-            config.get('MAIL_USE_SSL', False),
+            config.get('MAIL_HOSTS', {}),
             config.get('MAIL_DEFAULT_SENDER'),
             int(config.get('MAIL_DEBUG', debug)),
             config.get('MAIL_MAX_EMAILS'),
